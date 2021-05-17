@@ -1,0 +1,226 @@
+'''
+AddPartitionDeltas Version 1:
+This script generates delta difference day and generate dynamic Alter Adds partition statements
+'''
+from modules.ProcessLogger import setup_logging
+from datetime import datetime, date, timedelta
+from modules.GetAlerts import GetAlerts
+import traceback
+
+
+class GenerateALterAddPartitions:
+
+    current_day = datetime.today()
+    as_of_tdy = None
+    last_updated_date = None
+    logger = setup_logging().getLogger(__name__)
+    database = None
+    table_name = None
+    alertObj = GetAlerts()
+
+    # constructor object
+    def __init__(self):
+        pass
+
+    # desearlizes the row object
+    def desearlize_row(self, row):
+        dbname = row[0]
+        table_name = row[1]
+        return dbname, table_name
+
+    def create_hour_range(self,day_counter,delta_days_diffs,prev_hour,current_hour):
+        if day_counter == 0:
+            return range(prev_hour,24)
+        elif day_counter == delta_days_diffs:
+            return range(0,current_hour)
+        elif day_counter >0 or day_counter < delta_days_diffs:
+            return range(0,24)
+
+    # iterates over row object and generates hql files for each database
+    def generate_time_delta_partitions(self, **kargs):
+        
+        try:
+            subset_result = kargs['subsetresult']
+            daily_parts = kargs['partition_format'] # {datekey:%Y-%m-%d', hour: '%H} {year='%Y',month='%m',day='%d'}
+            fmt = kargs['partition_format']["format"] # %y-%m-%d %H
+            checkpoint = kargs['checkpoint_val'] #2020-12-12 07
+        except KeyError as kerr:
+            cause_msg = "Cause: Failed While Parsing Config File Information"
+            self.logger.error(kerr)
+            self.alertObj.sns_alert(traceback.format_exc(),cause_msg,kerr,__name__,self.alertObj.workflow)
+            raise kerr
+        
+        
+        alter_statement = ""
+        for row in subset_result:
+            database, table_name = self.desearlize_row(row)
+            
+            try:
+                self.as_of_tdy = datetime.strptime(self.current_day.strftime(fmt), fmt).date()
+                if checkpoint is not None:
+                    self.last_updated_date = datetime.strptime(checkpoint, fmt).date()
+                else:
+                    self.last_updated_date = self.as_of_tdy
+                #partition_key, last_partition_date = last_partition_value.split('=')
+                #self.last_updated_date = datetime.strptime(last_partition_date, fmt).date()
+                self.logger.info("Desearlized row object\
+                     values for DB,TABLE and LAST ADDED Partition Value - {0} {1}" \
+                             .format(database, table_name, self.last_updated_date))
+            except ValueError as valerr:
+                cause_msg = "Cause: Unable to Parse Date - Format Error"
+                self.logger.error("Date Format error {}".format(str(valerr)))
+                self.alertObj.sns_alert(traceback.format_exc(),cause_msg,valerr,__name__,self.alertObj.workflow)
+                raise valerr
+            except TypeError as typerr:
+                cause_msg = "Cause: Unsupported type exception"
+                self.logger.error("Unsupported type exception {}".format(typerr))
+                self.alertObj.sns_alert(traceback.format_exc(),cause_msg,typerr,__name__,self.alertObj.workflow)
+                raise typerr
+                
+            delta_difference = self.as_of_tdy - self.last_updated_date
+            delta_days_diffs = delta_difference.days
+            min, max = 1, delta_days_diffs + 1
+            if delta_days_diffs == 0:
+                min, max = 0, delta_days_diffs + 1
+            
+            self.logger.info("Delta Day Difference Count {}".format(str(delta_days_diffs)))
+            for day_counter in range(min, max):
+                tmp = []
+                delta_partition_value = self.last_updated_date + timedelta(day_counter)
+                for keys,values in daily_parts.items():
+                    if values != "" and keys != "format":
+                        tmp.append("{0}='{1}'".format(keys,delta_partition_value.strftime(values)))
+                        formatted_partition_string = ",".join(tmp)
+                        print (formatted_partition_string)
+                alter_statement += "ALTER TABLE {0}.{1} ADD IF NOT EXISTS PARTITION ({2});\n".format(database, table_name,
+                                                                          formatted_partition_string)
+        list_return=[]
+        list_return.append(alter_statement)
+        return list_return
+
+
+
+    #generate alter statements for day and hourly partitions..
+    def generate_datetime_hourly_partitions(self,**kargs):
+        print("&"*80)
+        subset_result = kargs['subsetresult']
+        #day_hour_checkpoint_val = kargs['day_hour_checkpoint_val']
+        #day_hour_part_keys = kargs['partition_frmt'].keys()
+        #fmt = " ".join(kargs['partition_frmt'].values())
+
+        daily_parts = kargs['partition_format'] # {datekey:%Y-%m-%d', hour: '%H} {year='%Y',month='%m',day='%d'}
+        day_hour_part_keys = kargs['partition_format'].keys()
+        fmt = kargs['partition_format']["format"]["fmt"] # %y-%m-%d %H
+        checkpoint = kargs['checkpoint_val'] #2020-12-12 07
+        print(checkpoint)
+        print(fmt)
+        print(day_hour_part_keys)
+        print(daily_parts)
+
+        alter = ""
+
+        # date hour partition format management , example fmt : %Y-%d-%m %H
+        # getting current date hour 
+        date_hour_store = datetime.today().strftime(fmt)
+        date_hour = date_hour_store.split(" ")
+
+
+
+        # generate delta days difference from last run date till current date
+
+
+
+        # day_hour_checkpoint_val is empty when running for current day and hour with no checkpoint
+        # So, Assigning day_hour_checkpoint_val to current day and hour
+        if(checkpoint == ""):
+            checkpoint = datetime.today().strftime(fmt)
+
+        prev_date_hour = checkpoint.split(" ")
+        current_date_hour = date_hour_store.split(" ")
+        prev_date = datetime.strptime(prev_date_hour[0], fmt.split(" ")[0]).date()
+        current_date = datetime.strptime(current_date_hour[0], fmt.split(" ")[0]).date()
+        prev_hour = int(prev_date_hour[1])
+        current_hour = int(current_date_hour[1])
+
+        delta_difference = current_date - prev_date
+        delta_days_diffs = delta_difference.days
+        print(prev_date,prev_hour,current_date,current_hour)
+
+        # generating alter statements for no checkpoint scenario
+        # generates alter statements for current day and hour on database subsets
+        if(current_date == prev_date and current_hour==prev_hour):
+            for row in subset_result:
+                tmp = []
+                database, table_name = self.desearlize_row(row)
+                for keys,values in daily_parts.items():
+                    if values != "" and keys != "format":
+                        tmp.append("{0}='{1}'".format(keys,datetime.today().strftime(values))) 
+                formatted_partition_string = ",".join(tmp)
+                print (formatted_partition_string)
+                alter = alter + "ALTER TABLE {0}.{1} ADD IF NOT EXISTS PARTITION ({2});\n".format(database,table_name,formatted_partition_string)
+            print(alter)
+            return alter,date_hour_store
+
+
+        # generating alter statements for checkpoint scenario
+        # restarting from checkpoint database 
+        # backfill the alter statements in case of any failures
+        # example : previous run day/hour = 2020-12-18 08 , then generate alter statements till current day/hour
+
+        elif((current_date == prev_date) and (current_hour!=prev_hour)):
+            print("%"*80)
+            self.logger.info("Delta Day Difference Count {}".format(str(delta_days_diffs)))
+            self.last_updated_date = datetime.strptime(checkpoint,fmt)
+            print(self.last_updated_date)
+            self.logger.info("checkpoint dt {}".format(self.last_updated_date))
+            hour_range = range(prev_hour,current_hour) ##02 to 10
+            for hour_counter in hour_range:
+                self.last_updated_date = self.last_updated_date + timedelta(hours = 1)
+                for row in subset_result:
+                    tmp=[]
+                    database, table_name = self.desearlize_row(row)
+                    print(database,table_name)
+                    for keys,values in daily_parts.items():
+                        if values != "" and keys != "format":
+                            tmp.append("{0}='{1}'".format(keys,self.last_updated_date.strftime(values)))
+                    formatted_partition_string = ",".join(tmp)
+                    print(formatted_partition_string)
+                    alter = alter + "ALTER TABLE {0}.{1} ADD IF NOT EXISTS PARTITION ({2});\n".format(database,table_name,formatted_partition_string)
+            return alter,date_hour_store
+
+        else:
+
+            min, max = 0, delta_days_diffs + 1
+            if delta_days_diffs == 0:
+                min, max = 0, delta_days_diffs + 1
+
+            self.last_updated_date = datetime.strptime(checkpoint,fmt)
+            for day_counter in range(min,max):
+                print("%"*80)
+                self.logger.info("Delta Day Difference Count {}".format(str(delta_days_diffs)))
+                hour_range = self.create_hour_range(day_counter,delta_days_diffs,prev_hour,current_hour)
+                print(hour_range)
+                print(self.last_updated_date)
+                for hour_counter in hour_range:
+                    self.last_updated_date = self.last_updated_date + timedelta(hours = 1)
+                    print(self.last_updated_date)
+                    for row in subset_result:
+                        tmp=[]
+                        database, table_name = self.desearlize_row(row)
+                        for keys,values in daily_parts.items():
+                            if values != "" and keys != "format":
+                                tmp.append("{0}='{1}'".format(keys,self.last_updated_date.strftime(values)))
+                        formatted_partition_string = ",".join(tmp)
+                        #print(formatted_partition_string)
+                        alter = alter + "ALTER TABLE {0}.{1} ADD IF NOT EXISTS PARTITION ({2});\n".format(database,table_name,formatted_partition_string)
+                print(self.last_updated_date)
+                #self.last_updated_date = self.last_updated_date + timedelta(days = 1)
+
+            list_return = []
+            list_return.append(alter)
+            list_return.append(date_hour_store)
+            return alter,date_hour_store
+
+
+
+
